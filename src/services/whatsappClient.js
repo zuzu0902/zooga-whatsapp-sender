@@ -1,78 +1,119 @@
-const qrcode = require('qrcode-terminal');
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const env = require('../config/env');
+const qrcodeTerminal = require('qrcode-terminal');
+const QRCode = require('qrcode');
 
 let client;
-let state = 'initializing';
+let senderState = 'initializing';
 let lastEventAt = new Date().toISOString();
 let lastError = null;
+let lastQrString = null;
+let lastQrDataUrl = null;
 
-function setState(nextState, error = null) {
-  state = nextState;
-  lastEventAt = new Date().toISOString();
-  if (error) lastError = error;
+function nowIso() {
+  return new Date().toISOString();
 }
 
-function initialize(logger) {
+async function buildQrImage(qr) {
+  try {
+    lastQrDataUrl = await QRCode.toDataURL(qr, {
+      errorCorrectionLevel: 'M',
+      margin: 2,
+      scale: 8
+    });
+  } catch (err) {
+    console.error('Failed to generate QR image', err.message);
+    lastQrDataUrl = null;
+  }
+}
+
+function initWhatsAppClient() {
   if (client) return client;
 
   client = new Client({
     authStrategy: new LocalAuth({
-      clientId: env.clientId,
-      dataPath: env.sessionPath
+      clientId: process.env.CLIENT_ID || 'zooga-broadcaster',
+      dataPath: process.env.SESSION_PATH || '.wwebjs_auth'
     }),
     puppeteer: {
-      headless: env.enableHeadless,
-      executablePath: env.puppeteerExecutablePath,
+      headless: process.env.ENABLE_HEADLESS !== 'false',
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: ['--no-sandbox', '--disable-setuid-sandbox']
     }
   });
 
-  client.on('qr', qr => {
-    setState('qr_required');
-    logger.info('QR generated. Scan with your phone.');
-    qrcode.generate(qr, { small: true });
+  client.on('qr', async (qr) => {
+    senderState = 'qr_required';
+    lastEventAt = nowIso();
+    lastError = null;
+    lastQrString = qr;
+
+    qrcodeTerminal.generate(qr, { small: true });
+    await buildQrImage(qr);
+
+    console.log('QR generated. Open /qr in browser if terminal QR is hard to scan.');
   });
 
   client.on('authenticated', () => {
-    setState('authenticated');
-    logger.info('WhatsApp authenticated');
+    senderState = 'authenticated';
+    lastEventAt = nowIso();
+    lastError = null;
+    console.log('WhatsApp authenticated');
   });
 
   client.on('ready', () => {
-    setState('ready');
-    logger.info('WhatsApp client ready');
+    senderState = 'ready';
+    lastEventAt = nowIso();
+    lastError = null;
+    lastQrString = null;
+    lastQrDataUrl = null;
+    console.log('WhatsApp client is ready');
   });
 
-  client.on('auth_failure', msg => {
-    setState('error', msg);
-    logger.error({ msg }, 'WhatsApp auth failure');
+  client.on('auth_failure', (msg) => {
+    senderState = 'error';
+    lastEventAt = nowIso();
+    lastError = `auth_failure: ${msg}`;
+    console.error('WhatsApp auth failure', msg);
   });
 
-  client.on('disconnected', reason => {
-    setState('disconnected', reason);
-    logger.warn({ reason }, 'WhatsApp disconnected');
+  client.on('disconnected', (reason) => {
+    senderState = 'disconnected';
+    lastEventAt = nowIso();
+    lastError = `disconnected: ${reason}`;
+    console.error('WhatsApp disconnected', reason);
   });
 
-  client.initialize().catch(err => {
-    setState('error', err.message);
-    logger.error({ err }, 'Failed to initialize WhatsApp client');
+  client.initialize().catch((err) => {
+    senderState = 'error';
+    lastEventAt = nowIso();
+    lastError = err.message;
+    console.error('Failed to initialize WhatsApp client', err);
   });
 
   return client;
 }
 
-function getClient() {
+function getWhatsAppClient() {
   return client;
 }
 
-function getSenderState() {
+function getSenderStatus() {
   return {
-    state,
-    is_ready: state === 'ready',
+    state: senderState,
+    is_ready: senderState === 'ready',
     last_event_at: lastEventAt,
-    last_error: lastError
+    last_error: lastError,
+    qr_available: !!lastQrDataUrl
   };
 }
 
-module.exports = { initialize, getClient, getSenderState };
+function getQrDataUrl() {
+  return lastQrDataUrl;
+}
+
+module.exports = {
+  initWhatsAppClient,
+  getWhatsAppClient,
+  getSenderStatus,
+  getQrDataUrl
+};
