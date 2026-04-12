@@ -8,7 +8,6 @@ const { initWhatsAppClient } = require('./services/whatsappClient');
 const groupsRoute = require('./routes/groups');
 const broadcastRoute = require('./routes/broadcast');
 const statusRoute = require('./routes/status');
-const qrRoute = require('./routes/qr');
 
 const app = express();
 
@@ -19,7 +18,6 @@ app.use(express.json());
 app.use('/groups', groupsRoute);
 app.use('/broadcast', broadcastRoute);
 app.use('/status', statusRoute);
-app.use('/qr', qrRoute);
 
 const PORT = process.env.PORT || 3000;
 
