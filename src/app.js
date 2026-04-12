@@ -1,7 +1,16 @@
 const express = require('express');
 const cors = require('cors');
 const pino = require('pino');
+require('dotenv').config();
+const app = require('./app');
+const { initWhatsAppClient } = require('./services/whatsappClient');
 
+const port = process.env.PORT || 3000;
+
+app.listen(port, () => {
+  console.log(`Server listening on port ${port}`);
+  initWhatsAppClient();
+});
 const healthRoute = require('./routes/health');
 const statusRoute = require('./routes/status');
 const groupsRoute = require('./routes/groups');
