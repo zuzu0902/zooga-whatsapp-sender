@@ -7,7 +7,6 @@ const { initWhatsAppClient } = require('./services/whatsappClient');
 
 const groupsRoute = require('./routes/groups');
 const broadcastRoute = require('./routes/broadcast');
-const sendTestRoute = require('./routes/sendTest');
 const statusRoute = require('./routes/status');
 const qrRoute = require('./routes/qr');
 
@@ -16,9 +15,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// routes
 app.use('/groups', groupsRoute);
 app.use('/broadcast', broadcastRoute);
-app.use('/send-test', sendTestRoute);
 app.use('/status', statusRoute);
 app.use('/qr', qrRoute);
 
