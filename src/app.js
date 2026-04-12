@@ -15,10 +15,17 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+/* ---------------- STATE ---------------- */
+
+let queue = [];
+let isRunning = false;
+let isPaused = false;
+let currentJob = null;
+
 /* ---------------- HEALTH ---------------- */
 
 app.get('/health', (req, res) => {
-  res.json({ ok: true, service: 'zooga-whatsapp-sender' });
+  res.json({ ok: true });
 });
 
 /* ---------------- STATUS ---------------- */
@@ -26,8 +33,10 @@ app.get('/health', (req, res) => {
 app.get('/status', (req, res) => {
   res.json({
     ok: true,
-    service: 'zooga-whatsapp-sender',
-    ...getSenderStatus()
+    ...getSenderStatus(),
+    queue_length: queue.length,
+    running: isRunning,
+    paused: isPaused
   });
 });
 
@@ -36,9 +45,7 @@ app.get('/status', (req, res) => {
 app.get('/qr', (req, res) => {
   const qr = getQrDataUrl();
 
-  if (!qr) {
-    return res.status(404).send('No QR available');
-  }
+  if (!qr) return res.status(404).send('No QR');
 
   res.send(`
     <html>
@@ -58,7 +65,6 @@ app.get('/groups', async (req, res) => {
 
     res.json({
       ok: true,
-      count: groups.length,
       groups
     });
 
@@ -70,129 +76,121 @@ app.get('/groups', async (req, res) => {
   }
 });
 
-/* ---------------- TEST SEND ---------------- */
+/* ---------------- ADD BROADCAST ---------------- */
 
-app.post('/send-test', async (req, res) => {
-  try {
-    const { whatsapp_chat_id, message_text } = req.body;
+app.post('/broadcast', (req, res) => {
+  const { message_text, targets, delay_ms = 3000, retries = 2 } = req.body;
 
-    const result = await sendMessageToGroup(
-      whatsapp_chat_id,
-      message_text
-    );
-
-    res.json({ ok: true, result });
-
-  } catch (err) {
-    res.status(500).json({
-      ok: false,
-      error: err.message
-    });
+  if (!targets || !targets.length) {
+    return res.status(400).json({ ok: false });
   }
-});
 
-/* ---------------- BROADCAST ENGINE ---------------- */
-
-let currentBroadcast = null;
-
-app.post('/broadcast', async (req, res) => {
-  try {
-    const {
-      message_text,
-      targets,
-      delay_ms = 3000,
-      max_retries = 2
-    } = req.body;
-
-    if (!message_text || !targets || !targets.length) {
-      return res.status(400).json({
-        ok: false,
-        error: 'message_text and targets required'
-      });
-    }
-
-    if (currentBroadcast) {
-      return res.status(400).json({
-        ok: false,
-        error: 'Broadcast already running'
-      });
-    }
-
-    currentBroadcast = {
-      total: targets.length,
-      sent: 0,
-      failed: 0,
-      in_progress: true,
-      started_at: new Date().toISOString()
-    };
-
-    // 🔥 RUN ASYNC (non-blocking)
-    runBroadcast(targets, message_text, delay_ms, max_retries);
-
-    res.json({
-      ok: true,
-      message: 'Broadcast started',
-      total: targets.length
+  targets.forEach(target => {
+    queue.push({
+      chatId: target,
+      message: message_text,
+      delay: delay_ms,
+      retries
     });
+  });
 
-  } catch (err) {
-    res.status(500).json({
-      ok: false,
-      error: err.message
-    });
-  }
-});
+  processQueue();
 
-/* ---------------- BROADCAST STATUS ---------------- */
-
-app.get('/broadcast-status', (req, res) => {
   res.json({
     ok: true,
-    broadcast: currentBroadcast
+    queued: targets.length
   });
 });
 
-/* ---------------- BROADCAST LOGIC ---------------- */
+/* ---------------- CLUSTER BROADCAST ---------------- */
 
-async function runBroadcast(targets, message, delayMs, maxRetries) {
-  console.log(`🚀 Starting broadcast to ${targets.length} groups`);
+app.post('/broadcast-clusters', (req, res) => {
+  const { clusters, delay_ms = 3000, retries = 2 } = req.body;
 
-  for (let i = 0; i < targets.length; i++) {
-    const target = targets[i];
+  clusters.forEach(cluster => {
+    cluster.targets.forEach(target => {
+      queue.push({
+        chatId: target,
+        message: cluster.message_text,
+        delay: delay_ms,
+        retries
+      });
+    });
+  });
+
+  processQueue();
+
+  res.json({ ok: true });
+});
+
+/* ---------------- QUEUE ENGINE ---------------- */
+
+async function processQueue() {
+  if (isRunning) return;
+
+  isRunning = true;
+
+  while (queue.length > 0) {
+
+    if (isPaused) {
+      await sleep(1000);
+      continue;
+    }
+
+    const job = queue.shift();
+    currentJob = job;
 
     let success = false;
 
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    for (let i = 0; i <= job.retries; i++) {
       try {
-        await sendMessageToGroup(target, message);
+        await sendMessageToGroup(job.chatId, job.message);
         success = true;
         break;
       } catch (err) {
-        console.log(`Retry ${attempt + 1} failed for ${target}`);
         await sleep(1000);
       }
     }
 
-    if (success) {
-      currentBroadcast.sent++;
-    } else {
-      currentBroadcast.failed++;
-    }
-
-    await sleep(delayMs);
+    await sleep(job.delay);
   }
 
-  currentBroadcast.in_progress = false;
-  currentBroadcast.finished_at = new Date().toISOString();
-
-  console.log('✅ Broadcast finished');
+  isRunning = false;
+  currentJob = null;
 }
 
-/* ---------------- HELPERS ---------------- */
+/* ---------------- CONTROL ---------------- */
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+app.post('/pause', (req, res) => {
+  isPaused = true;
+  res.json({ ok: true });
+});
+
+app.post('/resume', (req, res) => {
+  isPaused = false;
+  processQueue();
+  res.json({ ok: true });
+});
+
+app.post('/stop', (req, res) => {
+  queue = [];
+  isRunning = false;
+  isPaused = false;
+  currentJob = null;
+  res.json({ ok: true });
+});
+
+/* ---------------- STATUS ---------------- */
+
+app.get('/queue-status', (req, res) => {
+  res.json({
+    ok: true,
+    running: isRunning,
+    paused: isPaused,
+    queue_length: queue.length,
+    current: currentJob
+  });
+});
 
 /* ---------------- CONTROL ---------------- */
 
@@ -205,5 +203,11 @@ app.post('/reset-session', async (req, res) => {
   await resetSession();
   res.json({ ok: true });
 });
+
+/* ---------------- HELPERS ---------------- */
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 module.exports = app;
