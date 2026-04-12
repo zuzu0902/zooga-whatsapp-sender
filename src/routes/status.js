@@ -7,10 +7,7 @@ router.get('/', (req, res) => {
   try {
     const status = getSenderStatus();
 
-    res.json({
-      ok: true,
-      ...status
-    });
+    res.json(status);
   } catch (err) {
     res.status(500).json({
       ok: false,
