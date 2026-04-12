@@ -84,7 +84,15 @@ async function initWhatsAppClient() {
 
   client = createClient();
   bindClientEvents(client);
-  await client.initialize();
+
+  try {
+    await client.initialize();
+  } catch (err) {
+    lastError = err.message;
+    lastEventAt = nowIso();
+    client = null;
+    throw err;
+  }
 
   return client;
 }
@@ -157,8 +165,8 @@ async function getWhatsAppGroups() {
     ]);
 
     return chats
-      .filter(chat => chat.isGroup)
-      .map(chat => ({
+      .filter((chat) => chat.isGroup)
+      .map((chat) => ({
         whatsapp_chat_id: chat.id._serialized,
         name: chat.name || ''
       }));
@@ -187,7 +195,8 @@ async function sendMessageToGroup(chatId, message) {
   const currentClient = await ensureReadyClient();
 
   try {
-    const messageResult = await currentClient.sendMessage(chatId, message);
+    const chat = await currentClient.getChatById(chatId);
+    const messageResult = await chat.sendMessage(message);
 
     return {
       whatsapp_chat_id: chatId,
@@ -203,6 +212,7 @@ async function sendMessageToGroup(chatId, message) {
 
 async function restartClient() {
   isRestarting = true;
+
   try {
     await restartClientInternal();
   } finally {
@@ -224,7 +234,10 @@ async function resetSession() {
   client = null;
 
   try {
-    fs.rmSync(path.resolve(SESSION_PATH), { recursive: true, force: true });
+    fs.rmSync(path.resolve(SESSION_PATH), {
+      recursive: true,
+      force: true
+    });
   } catch (err) {
     console.log('Session cleanup skipped');
   }
