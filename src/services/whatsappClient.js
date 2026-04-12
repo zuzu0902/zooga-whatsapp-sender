@@ -2,32 +2,37 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcodeTerminal = require('qrcode-terminal');
 const QRCode = require('qrcode');
 
-let client;
+let client = null;
 let senderState = 'initializing';
 let lastEventAt = new Date().toISOString();
 let lastError = null;
-let lastQrString = null;
 let lastQrDataUrl = null;
 
 function nowIso() {
   return new Date().toISOString();
 }
 
-async function buildQrImage(qr) {
+async function buildQrImage(qrString) {
   try {
-    lastQrDataUrl = await QRCode.toDataURL(qr, {
+    lastQrDataUrl = await QRCode.toDataURL(qrString, {
       errorCorrectionLevel: 'M',
       margin: 2,
       scale: 8
     });
   } catch (err) {
-    console.error('Failed to generate QR image', err.message);
+    console.error('Failed to generate QR image:', err.message);
     lastQrDataUrl = null;
   }
 }
 
 function initWhatsAppClient() {
-  if (client) return client;
+  if (client) {
+    return client;
+  }
+
+  senderState = 'initializing';
+  lastEventAt = nowIso();
+  lastError = null;
 
   client = new Client({
     authStrategy: new LocalAuth({
@@ -45,12 +50,11 @@ function initWhatsAppClient() {
     senderState = 'qr_required';
     lastEventAt = nowIso();
     lastError = null;
-    lastQrString = qr;
 
     qrcodeTerminal.generate(qr, { small: true });
     await buildQrImage(qr);
 
-    console.log('QR generated. Open /qr in browser if terminal QR is hard to scan.');
+    console.log('QR generated. Open /qr in browser to scan.');
   });
 
   client.on('authenticated', () => {
@@ -64,7 +68,6 @@ function initWhatsAppClient() {
     senderState = 'ready';
     lastEventAt = nowIso();
     lastError = null;
-    lastQrString = null;
     lastQrDataUrl = null;
     console.log('WhatsApp client is ready');
   });
@@ -73,27 +76,23 @@ function initWhatsAppClient() {
     senderState = 'error';
     lastEventAt = nowIso();
     lastError = `auth_failure: ${msg}`;
-    console.error('WhatsApp auth failure', msg);
+    console.error('WhatsApp auth failure:', msg);
   });
 
   client.on('disconnected', (reason) => {
     senderState = 'disconnected';
     lastEventAt = nowIso();
     lastError = `disconnected: ${reason}`;
-    console.error('WhatsApp disconnected', reason);
+    console.error('WhatsApp disconnected:', reason);
   });
 
   client.initialize().catch((err) => {
     senderState = 'error';
     lastEventAt = nowIso();
     lastError = err.message;
-    console.error('Failed to initialize WhatsApp client', err);
+    console.error('Failed to initialize WhatsApp client:', err);
   });
 
-  return client;
-}
-
-function getWhatsAppClient() {
   return client;
 }
 
@@ -113,7 +112,6 @@ function getQrDataUrl() {
 
 module.exports = {
   initWhatsAppClient,
-  getWhatsAppClient,
   getSenderStatus,
   getQrDataUrl
 };
