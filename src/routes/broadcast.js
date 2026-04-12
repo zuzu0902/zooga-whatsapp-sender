@@ -1,58 +1,70 @@
 const express = require('express');
-const env = require('../config/env');
-const { validateBroadcastPayload } = require('../utils/helpers');
-const { getSenderState, getClient } = require('../services/whatsappClient');
-const { processBroadcast } = require('../services/broadcastProcessor');
-
 const router = express.Router();
 
-function ensureSecret(req, res, next) {
-  if (req.headers['x-admin-secret'] !== env.adminSharedSecret) {
-    return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  }
-  return next();
-}
+const { getClient } = require('../services/whatsappClient');
 
-router.post('/send-test', ensureSecret, async (req, res) => {
-  const sender = getSenderState();
-  if (!sender.is_ready) return res.status(409).json({ ok: false, error: 'Sender not ready' });
-  if (!env.enableSending) return res.status(403).json({ ok: false, error: 'Sending is disabled' });
-
-  const { whatsapp_chat_id, message_text } = req.body || {};
-  if (!whatsapp_chat_id || !message_text) {
-    return res.status(400).json({ ok: false, error: 'whatsapp_chat_id and message_text are required' });
-  }
-
+router.post('/broadcast', async (req, res) => {
   try {
-    const chat = await getClient().getChatById(whatsapp_chat_id);
-    const message = await chat.sendMessage(message_text);
-    return res.json({ ok: true, status: 'sent', message_id: message?.id?._serialized || null });
-  } catch (err) {
-    return res.status(500).json({ ok: false, status: 'failed', error: err.message });
-  }
-});
+    const { chat_ids, message } = req.body;
 
-router.post('/', ensureSecret, async (req, res) => {
-  const error = validateBroadcastPayload(req.body, env);
-  if (error) return res.status(400).json({ ok: false, error });
+    if (!chat_ids || !Array.isArray(chat_ids) || chat_ids.length === 0) {
+      return res.json({
+        ok: false,
+        error: 'chat_ids array is required'
+      });
+    }
 
-  const sender = getSenderState();
-  if (!sender.is_ready) return res.status(409).json({ ok: false, error: 'Sender not ready', state: sender.state });
-  if (!env.enableSending) return res.status(403).json({ ok: false, error: 'Sending is disabled' });
+    if (!message || message.trim() === '') {
+      return res.json({
+        ok: false,
+        error: 'message is required'
+      });
+    }
 
-  const payload = req.body;
-  setImmediate(() => {
-    processBroadcast(payload, req.log || console).catch(err => {
-      (req.log || console).error({ err: err.message, broadcast_id: payload.broadcast_id }, 'Broadcast processor crashed');
+    const client = getClient();
+
+    if (!client) {
+      return res.json({
+        ok: false,
+        error: 'WhatsApp client not ready'
+      });
+    }
+
+    const results = [];
+
+    for (const chatId of chat_ids) {
+      try {
+        await client.sendMessage(chatId, message);
+
+        results.push({
+          chat_id: chatId,
+          success: true
+        });
+
+        // delay קטן כדי לא להיחסם
+        await new Promise(r => setTimeout(r, 800));
+
+      } catch (err) {
+        results.push({
+          chat_id: chatId,
+          success: false,
+          error: err.message
+        });
+      }
+    }
+
+    return res.json({
+      ok: true,
+      count: results.length,
+      results
     });
-  });
 
-  return res.json({
-    ok: true,
-    accepted: true,
-    broadcast_id: payload.broadcast_id,
-    target_count: payload.targets.length
-  });
+  } catch (err) {
+    return res.json({
+      ok: false,
+      error: err.message
+    });
+  }
 });
 
 module.exports = router;
