@@ -1,5 +1,10 @@
 const express = require('express');
-const { getQrDataUrl, getSenderStatus } = require('./services/whatsappClient');
+const {
+  getQrDataUrl,
+  getSenderStatus,
+  getWhatsAppGroups,
+  sendMessageToGroup
+} = require('./services/whatsappClient');
 
 const app = express();
 
@@ -31,7 +36,6 @@ app.get('/qr', (req, res) => {
         <body style="font-family: Arial, sans-serif; padding: 40px; text-align: center; background: #f7f7f7;">
           <h2>כרגע אין QR זמין</h2>
           <p>אם הוואטסאפ כבר מחובר, זה תקין.</p>
-          <p>אם לא, חכה כמה שניות אחרי העלייה של השרת או בצע redeploy.</p>
         </body>
       </html>
     `);
@@ -52,6 +56,47 @@ app.get('/qr', (req, res) => {
       </body>
     </html>
   `);
+});
+
+app.get('/groups', async (req, res) => {
+  try {
+    const groups = await getWhatsAppGroups();
+    res.json({
+      ok: true,
+      count: groups.length,
+      groups
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: err.message
+    });
+  }
+});
+
+app.post('/send-test', async (req, res) => {
+  try {
+    const { whatsapp_chat_id, message_text } = req.body;
+
+    if (!whatsapp_chat_id || !message_text) {
+      return res.status(400).json({
+        ok: false,
+        error: 'whatsapp_chat_id and message_text are required'
+      });
+    }
+
+    const result = await sendMessageToGroup(whatsapp_chat_id, message_text);
+
+    res.json({
+      ok: true,
+      result
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: err.message
+    });
+  }
 });
 
 module.exports = app;
