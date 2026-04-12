@@ -8,7 +8,7 @@ const {
   getSenderStatus,
   getQrDataUrl,
   getWhatsAppGroups,
-  sendMessageToGroup,
+  sendTextToGroupById,
   restartClient,
   resetSession
 } = require('./services/whatsappClient');
@@ -69,8 +69,7 @@ app.get('/health', (req, res) => {
 
 app.get('/status', (req, res) => {
   try {
-    const status = getSenderStatus();
-    res.json(status);
+    res.json(getSenderStatus());
   } catch (err) {
     res.status(500).json({
       ok: false,
@@ -95,7 +94,7 @@ app.get('/qr', (req, res) => {
           <body style="font-family: Arial, sans-serif; padding: 40px; text-align: center; background: #f7f7f7;">
             <h2>כרגע אין QR זמין</h2>
             <p>אם הוואטסאפ כבר מחובר, זה תקין.</p>
-            <p>אם לא, בצע רענון סטטוס או אפס חיבור.</p>
+            <p>אם לא, בצע איפוס חיבור או רענון.</p>
           </body>
         </html>
       `);
@@ -143,6 +142,7 @@ app.get('/groups', async (req, res) => {
       groups
     });
   } catch (err) {
+    console.error('GET /groups failed:', err.message);
     res.status(500).json({
       ok: false,
       error: err.message
@@ -162,6 +162,11 @@ app.post('/send-test', async (req, res) => {
 
     const messageText = normalizeMessage(req.body);
 
+    console.log('SEND-TEST payload:', {
+      whatsappChatId,
+      messageText
+    });
+
     if (!whatsappChatId) {
       return res.status(400).json({
         ok: false,
@@ -176,13 +181,15 @@ app.post('/send-test', async (req, res) => {
       });
     }
 
-    const result = await sendMessageToGroup(whatsappChatId, messageText);
+    const result = await sendTextToGroupById(whatsappChatId, messageText);
 
     return res.json({
       ok: true,
       result
     });
   } catch (err) {
+    console.error('POST /send-test failed:', err.message);
+
     return res.status(500).json({
       ok: false,
       error: err.message
@@ -215,13 +222,19 @@ async function processQueue() {
     let sent = false;
     let lastError = null;
 
+    console.log('Processing job:', {
+      chatId: job.chatId,
+      message: job.message
+    });
+
     for (let attempt = 0; attempt <= job.retries; attempt++) {
       try {
-        await sendMessageToGroup(job.chatId, job.message);
+        await sendTextToGroupById(job.chatId, job.message);
         sent = true;
         break;
       } catch (err) {
         lastError = err.message;
+        console.error(`Attempt ${attempt + 1} failed for ${job.chatId}:`, err.message);
         await sleep(1200);
       }
     }
@@ -263,6 +276,13 @@ app.post('/broadcast', async (req, res) => {
     const messageText = normalizeMessage(req.body);
     const delayMs = Number(req.body.delay_ms || 3000);
     const retries = Number(req.body.retries || 2);
+
+    console.log('BROADCAST payload:', {
+      targets,
+      messageText,
+      delayMs,
+      retries
+    });
 
     if (!targets.length) {
       return res.status(400).json({
@@ -308,6 +328,8 @@ app.post('/broadcast', async (req, res) => {
       queued: uniqueTargets.length
     });
   } catch (err) {
+    console.error('POST /broadcast failed:', err.message);
+
     return res.status(500).json({
       ok: false,
       error: err.message
@@ -357,6 +379,7 @@ app.post('/stop', (req, res) => {
 app.post('/restart', async (req, res) => {
   try {
     await restartClient();
+
     res.json({
       ok: true,
       message: 'WhatsApp client restarting'
@@ -372,6 +395,7 @@ app.post('/restart', async (req, res) => {
 app.post('/reset-session', async (req, res) => {
   try {
     await resetSession();
+
     res.json({
       ok: true,
       message: 'WhatsApp session reset'
