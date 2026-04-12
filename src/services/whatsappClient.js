@@ -25,6 +25,19 @@ async function buildQrImage(qrString) {
   }
 }
 
+function getClient() {
+  if (!client) {
+    throw new Error('WhatsApp client is not initialized');
+  }
+  return client;
+}
+
+function ensureReady() {
+  if (senderState !== 'ready') {
+    throw new Error(`WhatsApp client is not ready. Current state: ${senderState}`);
+  }
+}
+
 function initWhatsAppClient() {
   if (client) {
     return client;
@@ -96,6 +109,35 @@ function initWhatsAppClient() {
   return client;
 }
 
+async function getWhatsAppGroups() {
+  ensureReady();
+
+  const currentClient = getClient();
+  const chats = await currentClient.getChats();
+
+  return chats
+    .filter(chat => chat.isGroup)
+    .map(chat => ({
+      whatsapp_chat_id: chat.id._serialized,
+      name: chat.name || 'ללא שם'
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'he'));
+}
+
+async function sendMessageToGroup(whatsappChatId, messageText) {
+  ensureReady();
+
+  const currentClient = getClient();
+  const chat = await currentClient.getChatById(whatsappChatId);
+  const message = await chat.sendMessage(messageText);
+
+  return {
+    whatsapp_chat_id: whatsappChatId,
+    message_id: message?.id?._serialized || null,
+    status: 'sent'
+  };
+}
+
 function getSenderStatus() {
   return {
     state: senderState,
@@ -113,5 +155,7 @@ function getQrDataUrl() {
 module.exports = {
   initWhatsAppClient,
   getSenderStatus,
-  getQrDataUrl
+  getQrDataUrl,
+  getWhatsAppGroups,
+  sendMessageToGroup
 };
