@@ -56,6 +56,19 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function dataUrlToBuffer(dataUrl) {
+  const matches = dataUrl.match(/^data:(.+);base64,(.+)$/);
+  if (!matches) {
+    throw new Error('Invalid data URL');
+  }
+
+  const mimeType = matches[1];
+  const base64Data = matches[2];
+  const buffer = Buffer.from(base64Data, 'base64');
+
+  return { mimeType, buffer };
+}
+
 /* ---------------- HEALTH ---------------- */
 
 app.get('/health', (req, res) => {
@@ -78,7 +91,7 @@ app.get('/status', (req, res) => {
   }
 });
 
-/* ---------------- QR ---------------- */
+/* ---------------- QR PAGE ---------------- */
 
 app.get('/qr', (req, res) => {
   try {
@@ -128,6 +141,32 @@ app.get('/qr', (req, res) => {
         </body>
       </html>
     `);
+  }
+});
+
+/* ---------------- QR IMAGE ---------------- */
+
+app.get('/qr-image', (req, res) => {
+  try {
+    const qrDataUrl = getQrDataUrl();
+
+    if (!qrDataUrl) {
+      return res.status(404).json({
+        ok: false,
+        error: 'No QR available'
+      });
+    }
+
+    const { mimeType, buffer } = dataUrlToBuffer(qrDataUrl);
+
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    return res.send(buffer);
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      error: err.message
+    });
   }
 });
 
