@@ -1,4 +1,5 @@
 const express = require('express');
+const cors = require('cors');
 const {
   getQrDataUrl,
   getSenderStatus,
@@ -7,6 +8,11 @@ const {
 } = require('./services/whatsappClient');
 
 const app = express();
+
+app.use(cors({
+  origin: true,
+  credentials: false
+}));
 
 app.use(express.json());
 
@@ -49,7 +55,7 @@ app.get('/qr', (req, res) => {
       </head>
       <body style="font-family: Arial, sans-serif; padding: 40px; text-align: center; background: #f7f7f7;">
         <h2>סרוק את הקוד עם וואטסאפ</h2>
-        <p>WhatsApp → מכשירים מקושרים → קישור מכשיר</p>
+        <p>וואטסאפ > מכשירים מקושרים > קישור מכשיר</p>
         <div style="background: white; display: inline-block; padding: 20px; border-radius: 16px; box-shadow: 0 2px 12px rgba(0,0,0,0.12);">
           <img src="${qrDataUrl}" alt="WhatsApp QR" style="max-width: 360px; width: 100%; height: auto;" />
         </div>
