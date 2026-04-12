@@ -3,20 +3,60 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
-const { initWhatsAppClient } = require('./services/whatsappClient');
-
-const statusRoute = require('./routes/status');
-const groupsRoute = require('./routes/groups');
-const broadcastRoute = require('./routes/broadcast');
+const {
+  initWhatsAppClient,
+  getSenderStatus,
+  getQrDataUrl,
+  getWhatsAppGroups,
+  sendMessageToGroup,
+  restartClient,
+  resetSession
+} = require('./services/whatsappClient');
 
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
-app.use('/status', statusRoute);
-app.use('/groups', groupsRoute);
-app.use('/broadcast', broadcastRoute);
+function normalizeTargets(rawTargets) {
+  if (!Array.isArray(rawTargets)) return [];
+
+  return rawTargets
+    .map((item) => {
+      if (!item) return null;
+
+      if (typeof item === 'string') return item.trim();
+
+      if (typeof item === 'object') {
+        return (
+          item.whatsapp_chat_id ||
+          item.chat_id ||
+          item.target ||
+          item.id ||
+          null
+        );
+      }
+
+      return null;
+    })
+    .filter(Boolean);
+}
+
+function normalizeMessage(body) {
+  return (
+    body.message_text ||
+    body.message ||
+    body.text ||
+    body.caption_text ||
+    ''
+  ).trim();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/* ---------------- HEALTH ---------------- */
 
 app.get('/health', (req, res) => {
   res.json({
@@ -25,9 +65,24 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.get('/qr', async (req, res) => {
+/* ---------------- STATUS ---------------- */
+
+app.get('/status', (req, res) => {
   try {
-    const { getQrDataUrl } = require('./services/whatsappClient');
+    const status = getSenderStatus();
+    res.json(status);
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: err.message
+    });
+  }
+});
+
+/* ---------------- QR ---------------- */
+
+app.get('/qr', (req, res) => {
+  try {
     const qrDataUrl = getQrDataUrl();
 
     if (!qrDataUrl) {
@@ -40,7 +95,7 @@ app.get('/qr', async (req, res) => {
           <body style="font-family: Arial, sans-serif; padding: 40px; text-align: center; background: #f7f7f7;">
             <h2>כרגע אין QR זמין</h2>
             <p>אם הוואטסאפ כבר מחובר, זה תקין.</p>
-            <p>אם לא, בצע רענון או אתחול חיבור.</p>
+            <p>אם לא, בצע רענון סטטוס או אפס חיבור.</p>
           </body>
         </html>
       `);
@@ -54,7 +109,7 @@ app.get('/qr', async (req, res) => {
         </head>
         <body style="font-family: Arial, sans-serif; padding: 40px; text-align: center; background: #f7f7f7;">
           <h2>סרוק את הקוד עם וואטסאפ</h2>
-          <p>וואטסאפ > מכשירים מקושרים > קישור מכשיר</p>
+          <p>וואטסאפ &gt; מכשירים מקושרים &gt; קישור מכשיר</p>
           <div style="background: white; display: inline-block; padding: 20px; border-radius: 16px; box-shadow: 0 2px 12px rgba(0,0,0,0.12);">
             <img src="${qrDataUrl}" alt="WhatsApp QR" style="max-width: 360px; width: 100%; height: auto;" />
           </div>
@@ -77,19 +132,51 @@ app.get('/qr', async (req, res) => {
   }
 });
 
+/* ---------------- GROUPS ---------------- */
+
+app.get('/groups', async (req, res) => {
+  try {
+    const groups = await getWhatsAppGroups();
+
+    res.json({
+      ok: true,
+      groups
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: err.message
+    });
+  }
+});
+
+/* ---------------- SEND TEST ---------------- */
+
 app.post('/send-test', async (req, res) => {
   try {
-    const { whatsapp_chat_id, message_text } = req.body;
+    const whatsappChatId =
+      req.body.whatsapp_chat_id ||
+      req.body.chat_id ||
+      req.body.target ||
+      null;
 
-    if (!whatsapp_chat_id || !message_text) {
+    const messageText = normalizeMessage(req.body);
+
+    if (!whatsappChatId) {
       return res.status(400).json({
         ok: false,
-        error: 'whatsapp_chat_id and message_text are required'
+        error: 'Missing whatsapp_chat_id'
       });
     }
 
-    const { sendMessageToGroup } = require('./services/whatsappClient');
-    const result = await sendMessageToGroup(whatsapp_chat_id, message_text);
+    if (!messageText) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Missing message_text'
+      });
+    }
+
+    const result = await sendMessageToGroup(whatsappChatId, messageText);
 
     return res.json({
       ok: true,
@@ -103,14 +190,122 @@ app.post('/send-test', async (req, res) => {
   }
 });
 
-app.post('/restart', async (req, res) => {
+/* ---------------- BROADCAST ---------------- */
+
+let queue = [];
+let isRunning = false;
+let isPaused = false;
+let currentJob = null;
+let lastBroadcastSummary = null;
+
+async function processQueue() {
+  if (isRunning) return;
+
+  isRunning = true;
+
+  while (queue.length > 0) {
+    if (isPaused) {
+      await sleep(1000);
+      continue;
+    }
+
+    const job = queue.shift();
+    currentJob = job;
+
+    let sent = false;
+    let lastError = null;
+
+    for (let attempt = 0; attempt <= job.retries; attempt++) {
+      try {
+        await sendMessageToGroup(job.chatId, job.message);
+        sent = true;
+        break;
+      } catch (err) {
+        lastError = err.message;
+        await sleep(1200);
+      }
+    }
+
+    job.status = sent ? 'sent' : 'failed';
+    job.error = sent ? null : lastError;
+    job.finished_at = new Date().toISOString();
+
+    if (!lastBroadcastSummary) {
+      lastBroadcastSummary = {
+        total: 0,
+        sent: 0,
+        failed: 0,
+        started_at: new Date().toISOString(),
+        finished_at: null
+      };
+    }
+
+    if (sent) {
+      lastBroadcastSummary.sent += 1;
+    } else {
+      lastBroadcastSummary.failed += 1;
+    }
+
+    await sleep(job.delay);
+  }
+
+  isRunning = false;
+  currentJob = null;
+
+  if (lastBroadcastSummary) {
+    lastBroadcastSummary.finished_at = new Date().toISOString();
+  }
+}
+
+app.post('/broadcast', async (req, res) => {
   try {
-    const { restartClient } = require('./services/whatsappClient');
-    await restartClient();
+    const targets = normalizeTargets(req.body.targets);
+    const messageText = normalizeMessage(req.body);
+    const delayMs = Number(req.body.delay_ms || 3000);
+    const retries = Number(req.body.retries || 2);
+
+    if (!targets.length) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Missing targets'
+      });
+    }
+
+    if (!messageText) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Missing message_text'
+      });
+    }
+
+    const uniqueTargets = [...new Set(targets)];
+
+    lastBroadcastSummary = {
+      total: uniqueTargets.length,
+      sent: 0,
+      failed: 0,
+      started_at: new Date().toISOString(),
+      finished_at: null
+    };
+
+    uniqueTargets.forEach((chatId) => {
+      queue.push({
+        chatId,
+        message: messageText,
+        delay: delayMs,
+        retries,
+        status: 'queued',
+        error: null,
+        created_at: new Date().toISOString(),
+        finished_at: null
+      });
+    });
+
+    processQueue();
 
     return res.json({
       ok: true,
-      message: 'WhatsApp client restarting'
+      queued: uniqueTargets.length
     });
   } catch (err) {
     return res.status(500).json({
@@ -120,17 +315,69 @@ app.post('/restart', async (req, res) => {
   }
 });
 
+/* ---------------- QUEUE STATUS ---------------- */
+
+app.get('/queue-status', (req, res) => {
+  res.json({
+    ok: true,
+    running: isRunning,
+    paused: isPaused,
+    queue_length: queue.length,
+    current: currentJob,
+    summary: lastBroadcastSummary
+  });
+});
+
+app.post('/pause', (req, res) => {
+  isPaused = true;
+  res.json({ ok: true });
+});
+
+app.post('/resume', (req, res) => {
+  isPaused = false;
+  processQueue();
+  res.json({ ok: true });
+});
+
+app.post('/stop', (req, res) => {
+  queue = [];
+  isRunning = false;
+  isPaused = false;
+  currentJob = null;
+
+  if (lastBroadcastSummary && !lastBroadcastSummary.finished_at) {
+    lastBroadcastSummary.finished_at = new Date().toISOString();
+  }
+
+  res.json({ ok: true });
+});
+
+/* ---------------- CONNECTION CONTROL ---------------- */
+
+app.post('/restart', async (req, res) => {
+  try {
+    await restartClient();
+    res.json({
+      ok: true,
+      message: 'WhatsApp client restarting'
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: err.message
+    });
+  }
+});
+
 app.post('/reset-session', async (req, res) => {
   try {
-    const { resetSession } = require('./services/whatsappClient');
     await resetSession();
-
-    return res.json({
+    res.json({
       ok: true,
       message: 'WhatsApp session reset'
     });
   } catch (err) {
-    return res.status(500).json({
+    res.status(500).json({
       ok: false,
       error: err.message
     });
