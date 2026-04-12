@@ -191,19 +191,35 @@ async function getWhatsAppGroups() {
   }
 }
 
-async function sendMessageToGroup(chatId, message) {
+async function sendTextToGroupById(chatId, messageText) {
   const currentClient = await ensureReadyClient();
 
   try {
-    const chat = await currentClient.getChatById(chatId);
-    const messageResult = await chat.sendMessage(message);
+    const chat = await Promise.race([
+      currentClient.getChatById(chatId),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('getChatById timeout')), 10000)
+      )
+    ]);
+
+    if (!chat) {
+      throw new Error(`Chat not found: ${chatId}`);
+    }
+
+    const result = await Promise.race([
+      chat.sendMessage(messageText),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('sendMessage timeout')), 15000)
+      )
+    ]);
 
     return {
       whatsapp_chat_id: chatId,
-      message_id: messageResult?.id?._serialized || null,
+      message_id: result?.id?._serialized || null,
       status: 'sent'
     };
   } catch (err) {
+    console.error(`sendTextToGroupById failed for ${chatId}:`, err.message);
     lastError = err.message;
     lastEventAt = nowIso();
     throw err;
@@ -259,7 +275,7 @@ module.exports = {
   getSenderStatus,
   getQrDataUrl,
   getWhatsAppGroups,
-  sendMessageToGroup,
+  sendTextToGroupById,
   restartClient,
   resetSession
 };
