@@ -3,7 +3,7 @@ const qrcode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 
-let client;
+let client = null;
 let isReady = false;
 let lastQrDataUrl = null;
 let lastEventAt = null;
@@ -29,8 +29,8 @@ async function buildQrDataUrl(qrText) {
   }
 }
 
-function initWhatsAppClient() {
-  client = new Client({
+function createClient() {
+  return new Client({
     authStrategy: new LocalAuth({
       dataPath: SESSION_PATH
     }),
@@ -38,43 +38,55 @@ function initWhatsAppClient() {
       args: ['--no-sandbox', '--disable-setuid-sandbox']
     }
   });
+}
 
-  client.on('qr', async (qr) => {
-    console.log('📱 QR received');
+function bindClientEvents(instance) {
+  instance.on('qr', async (qr) => {
+    console.log('QR received');
     isReady = false;
     lastEventAt = nowIso();
     lastError = null;
-
     await buildQrDataUrl(qr);
   });
 
-  client.on('ready', () => {
-    console.log('✅ WhatsApp ready');
+  instance.on('ready', () => {
+    console.log('WhatsApp ready');
     isReady = true;
     lastQrDataUrl = null;
     lastEventAt = nowIso();
     lastError = null;
   });
 
-  client.on('authenticated', () => {
-    console.log('🔐 Authenticated');
+  instance.on('authenticated', () => {
+    console.log('WhatsApp authenticated');
     lastEventAt = nowIso();
+    lastError = null;
   });
 
-  client.on('auth_failure', (msg) => {
-    console.error('❌ Auth failure:', msg);
+  instance.on('auth_failure', (msg) => {
+    console.error('Auth failure:', msg);
     isReady = false;
     lastError = msg;
     lastEventAt = nowIso();
   });
 
-  client.on('disconnected', (reason) => {
-    console.log('⚠️ Disconnected:', reason);
+  instance.on('disconnected', (reason) => {
+    console.log('Disconnected:', reason);
     isReady = false;
     lastEventAt = nowIso();
   });
+}
 
-  client.initialize();
+async function initWhatsAppClient() {
+  if (client) {
+    return client;
+  }
+
+  client = createClient();
+  bindClientEvents(client);
+  await client.initialize();
+
+  return client;
 }
 
 function getSenderStatus() {
@@ -84,9 +96,12 @@ function getSenderStatus() {
     state = 'ready';
   } else if (lastQrDataUrl) {
     state = 'qr_required';
+  } else if (isRestarting) {
+    state = 'initializing';
   }
 
   return {
+    ok: true,
     state,
     is_ready: isReady,
     last_event_at: lastEventAt,
@@ -100,31 +115,42 @@ function getQrDataUrl() {
   return lastQrDataUrl;
 }
 
-async function restartClientInternal() {
-  console.log('🔄 AUTO restarting client...');
+async function ensureReadyClient() {
+  if (!client) {
+    await initWhatsAppClient();
+  }
 
+  if (!client || !isReady) {
+    throw new Error('WhatsApp client is not ready');
+  }
+
+  return client;
+}
+
+async function restartClientInternal() {
   try {
     if (client) {
       await client.destroy();
     }
-  } catch (e) {}
+  } catch (err) {
+    console.log('Destroy error ignored');
+  }
 
+  client = null;
   isReady = false;
   lastQrDataUrl = null;
   lastError = null;
   lastEventAt = nowIso();
 
-  initWhatsAppClient();
+  await initWhatsAppClient();
 }
 
 async function getWhatsAppGroups() {
-  if (!client || !isReady) {
-    throw new Error('WhatsApp client is not ready');
-  }
+  const currentClient = await ensureReadyClient();
 
   try {
     const chats = await Promise.race([
-      client.getChats(),
+      currentClient.getChats(),
       new Promise((_, reject) =>
         setTimeout(() => reject(new Error('timeout')), 10000)
       )
@@ -134,23 +160,22 @@ async function getWhatsAppGroups() {
       .filter(chat => chat.isGroup)
       .map(chat => ({
         whatsapp_chat_id: chat.id._serialized,
-        name: chat.name
+        name: chat.name || ''
       }));
-
   } catch (err) {
-    console.error('⚠️ getWhatsAppGroups failed:', err.message);
-
+    console.error('getWhatsAppGroups failed:', err.message);
     lastError = err.message;
     lastEventAt = nowIso();
     isReady = false;
 
-    // 🔥 SELF HEALING
     if (!isRestarting) {
       isRestarting = true;
-
       setTimeout(async () => {
-        await restartClientInternal();
-        isRestarting = false;
+        try {
+          await restartClientInternal();
+        } finally {
+          isRestarting = false;
+        }
       }, 1000);
     }
 
@@ -159,40 +184,61 @@ async function getWhatsAppGroups() {
 }
 
 async function sendMessageToGroup(chatId, message) {
-  if (!client || !isReady) {
-    throw new Error('WhatsApp client is not ready');
-  }
+  const currentClient = await ensureReadyClient();
 
-  return client.sendMessage(chatId, message);
+  try {
+    const messageResult = await currentClient.sendMessage(chatId, message);
+
+    return {
+      whatsapp_chat_id: chatId,
+      message_id: messageResult?.id?._serialized || null,
+      status: 'sent'
+    };
+  } catch (err) {
+    lastError = err.message;
+    lastEventAt = nowIso();
+    throw err;
+  }
 }
 
 async function restartClient() {
-  console.log('🔄 Manual restart');
-
   isRestarting = true;
-  await restartClientInternal();
-  isRestarting = false;
+  try {
+    await restartClientInternal();
+  } finally {
+    isRestarting = false;
+  }
 }
 
 async function resetSession() {
-  console.log('🧹 Reset session');
+  isRestarting = true;
 
   try {
     if (client) {
       await client.destroy();
     }
-  } catch (e) {}
+  } catch (err) {
+    console.log('Destroy error ignored');
+  }
+
+  client = null;
 
   try {
     fs.rmSync(path.resolve(SESSION_PATH), { recursive: true, force: true });
-  } catch (e) {}
+  } catch (err) {
+    console.log('Session cleanup skipped');
+  }
 
   isReady = false;
   lastQrDataUrl = null;
   lastError = null;
   lastEventAt = nowIso();
 
-  initWhatsAppClient();
+  try {
+    await initWhatsAppClient();
+  } finally {
+    isRestarting = false;
+  }
 }
 
 module.exports = {
