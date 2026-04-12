@@ -1,41 +1,50 @@
 const express = require('express');
-const cors = require('cors');
-const pino = require('pino');
-require('dotenv').config();
-const app = require('./app');
-const { initWhatsAppClient } = require('./services/whatsappClient');
+const { getQrDataUrl, getSenderStatus } = require('./services/whatsappClient');
 
-const port = process.env.PORT || 3000;
-
-app.listen(port, () => {
-  console.log(`Server listening on port ${port}`);
-  initWhatsAppClient();
-});
-const healthRoute = require('./routes/health');
-const statusRoute = require('./routes/status');
-const groupsRoute = require('./routes/groups');
-const broadcastRoute = require('./routes/broadcast');
-const jobsRoute = require('./routes/jobs');
-
-const logger = pino({ level: 'info' });
 const app = express();
 
-app.use(cors());
-app.use(express.json({ limit: '2mb' }));
-app.use((req, _res, next) => {
-  req.log = logger;
-  next();
+app.use(express.json());
+
+app.get('/health', (req, res) => {
+  res.json({ ok: true });
 });
 
-app.use('/health', healthRoute);
-app.use('/status', statusRoute);
-app.use('/groups', groupsRoute);
-app.use('/broadcast', broadcastRoute);
-app.use('/jobs', jobsRoute);
-
-app.use((err, _req, res, _next) => {
-  logger.error({ err: err.message, stack: err.stack }, 'Unhandled error');
-  res.status(500).json({ ok: false, error: err.message || 'Internal Server Error' });
+app.get('/status', (req, res) => {
+  const status = getSenderStatus();
+  res.json({ ok: true, ...status });
 });
 
-module.exports = { app, logger };
+app.get('/qr', (req, res) => {
+  const qrDataUrl = getQrDataUrl();
+
+  if (!qrDataUrl) {
+    return res.status(404).send(`
+      <html dir="rtl">
+        <body style="font-family:Arial;padding:40px;text-align:center">
+          <h2>כרגע אין QR זמין</h2>
+          <p>אם הוואטסאפ כבר מחובר, זה תקין.</p>
+          <p>אם לא, בצע restart לשירות וחזור לכאן.</p>
+        </body>
+      </html>
+    `);
+  }
+
+  return res.send(`
+    <html dir="rtl">
+      <head>
+        <meta charset="utf-8" />
+        <title>WhatsApp QR</title>
+      </head>
+      <body style="font-family:Arial;padding:40px;text-align:center;background:#f7f7f7">
+        <h2>סרוק את הקוד עם וואטסאפ</h2>
+        <p>WhatsApp → מכשירים מקושרים → קישור מכשיר</p>
+        <div style="background:white;display:inline-block;padding:20px;border-radius:16px;box-shadow:0 2px 12px rgba(0,0,0,0.1)">
+          <img src="${qrDataUrl}" alt="WhatsApp QR" style="max-width:360px;width:100%;height:auto" />
+        </div>
+        <p style="margin-top:20px;color:#666">אם הקוד לא עובד, רענן את השירות כדי לקבל QR חדש.</p>
+      </body>
+    </html>
+  `);
+});
+
+module.exports = app;
