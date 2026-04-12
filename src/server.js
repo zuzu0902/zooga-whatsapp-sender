@@ -1,8 +1,11 @@
-const { app, logger } = require('./app');
-const env = require('./config/env');
-const { initialize } = require('./services/whatsappClient');
+require('dotenv').config();
 
-app.listen(env.port, () => {
-  logger.info({ port: env.port }, 'Server listening');
-  initialize(logger);
+const app = require('./app');
+const { initWhatsAppClient } = require('./services/whatsappClient');
+
+const port = process.env.PORT || 3000;
+
+app.listen(port, () => {
+  console.log(`Server listening on port ${port}`);
+  initWhatsAppClient();
 });
