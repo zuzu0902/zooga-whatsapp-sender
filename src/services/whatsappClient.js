@@ -17,11 +17,7 @@ function nowIso() {
 }
 
 async function buildQrDataUrl(qrText) {
-  try {
-    lastQrDataUrl = await qrcode.toDataURL(qrText);
-  } catch (err) {
-    lastQrDataUrl = null;
-  }
+  lastQrDataUrl = await qrcode.toDataURL(qrText);
 }
 
 function createClient() {
@@ -35,8 +31,6 @@ function createClient() {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
         '--no-zygote',
         '--single-process',
         '--disable-gpu'
@@ -45,34 +39,34 @@ function createClient() {
   });
 }
 
-function bindClientEvents(instance) {
-  instance.on('qr', async (qr) => {
+function bindEvents(c) {
+  c.on('qr', async (qr) => {
     console.log('QR received');
     isReady = false;
     lastEventAt = nowIso();
     await buildQrDataUrl(qr);
   });
 
-  instance.on('ready', () => {
-    console.log('WhatsApp ready');
+  c.on('ready', () => {
+    console.log('READY');
     isReady = true;
     lastQrDataUrl = null;
     lastEventAt = nowIso();
   });
 
-  instance.on('authenticated', () => {
-    console.log('Authenticated');
+  c.on('authenticated', () => {
+    console.log('AUTH OK');
     lastEventAt = nowIso();
   });
 
-  instance.on('auth_failure', (msg) => {
-    console.error('Auth failure:', msg);
+  c.on('auth_failure', (msg) => {
+    console.error('AUTH FAIL', msg);
     lastError = msg;
     isReady = false;
   });
 
-  instance.on('disconnected', (reason) => {
-    console.log('Disconnected:', reason);
+  c.on('disconnected', (reason) => {
+    console.log('DISCONNECTED', reason);
     isReady = false;
   });
 }
@@ -81,13 +75,12 @@ async function initWhatsAppClient() {
   if (client) return client;
 
   client = createClient();
-  bindClientEvents(client);
+  bindEvents(client);
 
   try {
     await client.initialize();
   } catch (err) {
-    console.error('INIT FAILED:', err.message);
-    lastError = err.message;
+    console.error('INIT ERROR', err.message);
     client = null;
     throw err;
   }
@@ -96,15 +89,9 @@ async function initWhatsAppClient() {
 }
 
 function getSenderStatus() {
-  let state = 'disconnected';
-
-  if (isReady) state = 'ready';
-  else if (lastQrDataUrl) state = 'qr_required';
-  else if (isRestarting) state = 'initializing';
-
   return {
     ok: true,
-    state,
+    state: isReady ? 'ready' : lastQrDataUrl ? 'qr_required' : 'initializing',
     is_ready: isReady,
     last_event_at: lastEventAt,
     last_error: lastError,
@@ -117,18 +104,31 @@ function getQrDataUrl() {
   return lastQrDataUrl;
 }
 
-async function ensureReadyClient() {
+async function ensureClient() {
   if (!client) await initWhatsAppClient();
 
-  if (!client || !isReady) {
-    throw new Error('WhatsApp not ready');
+  if (!client) {
+    throw new Error('Client not initialized');
   }
 
   return client;
 }
 
+async function waitUntilReady(timeoutMs = 15000) {
+  const start = Date.now();
+
+  while (!isReady) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error('WhatsApp not ready after timeout');
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+}
+
 async function getWhatsAppGroups() {
-  const c = await ensureReadyClient();
+  const c = await ensureClient();
+  await waitUntilReady();
+
   const chats = await c.getChats();
 
   return chats
@@ -140,10 +140,16 @@ async function getWhatsAppGroups() {
 }
 
 async function sendTextToGroupById(chatId, text) {
-  const c = await ensureReadyClient();
+  const c = await ensureClient();
+  await waitUntilReady();
+
+  console.log('SENDING TO:', chatId);
 
   const chat = await c.getChatById(chatId);
+
   const result = await chat.sendMessage(text);
+
+  console.log('SENT OK');
 
   return {
     whatsapp_chat_id: chatId,
