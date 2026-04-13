@@ -16,8 +16,7 @@ let isRestarting = false;
 const SESSION_PATH = '.wwebjs_auth';
 
 const READY_TIMEOUT_MS = 45000;
-const GET_CHATS_TIMEOUT_MS = 90000;
-const SEND_MESSAGE_TIMEOUT_MS = 90000;
+const SEND_TIMEOUT_MS = 90000;
 
 function nowIso() {
   return new Date().toISOString();
@@ -36,10 +35,7 @@ async function withTimeout(promise, timeoutMs, label) {
   return Promise.race([
     promise,
     new Promise((_, reject) =>
-      setTimeout(
-        () => reject(new Error(`${label} timeout after ${timeoutMs}ms`)),
-        timeoutMs
-      )
+      setTimeout(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)), timeoutMs)
     )
   ]);
 }
@@ -52,7 +48,7 @@ async function buildQrDataUrl(qrText) {
       scale: 8
     });
   } catch (err) {
-    console.error('Failed to build QR:', err.message);
+    console.error('QR build failed:', err.message);
     lastQrDataUrl = null;
     setError(err);
   }
@@ -66,8 +62,7 @@ function isRecoverableBrowserError(err) {
     msg.includes('detached frame') ||
     msg.includes('execution context was destroyed') ||
     msg.includes('session closed') ||
-    msg.includes('protocol error') ||
-    msg.includes('most likely the page has been closed')
+    msg.includes('protocol error')
   );
 }
 
@@ -83,15 +78,8 @@ function createClient() {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
         '--disable-gpu',
-        '--disable-background-networking',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
-        '--disable-features=site-per-process,Translate,BackForwardCache',
+        '--no-zygote',
         '--disable-extensions'
       ]
     }
@@ -116,13 +104,12 @@ function bindClientEvents(instance) {
   });
 
   instance.on('authenticated', () => {
-    console.log('WhatsApp authenticated');
+    console.log('Authenticated');
     lastEventAt = nowIso();
-    lastError = null;
   });
 
   instance.on('auth_failure', (msg) => {
-    console.error('Auth failure:', msg);
+    console.log('Auth failure:', msg);
     isReady = false;
     setError(msg);
   });
@@ -132,32 +119,21 @@ function bindClientEvents(instance) {
     isReady = false;
     setError(reason);
   });
-
-  instance.on('change_state', (state) => {
-    console.log('Client state changed:', state);
-    lastEventAt = nowIso();
-  });
 }
 
 async function initWhatsAppClient() {
-  if (client) {
-    return client;
-  }
-
-  if (initPromise) {
-    return initPromise;
-  }
+  if (client) return client;
+  if (initPromise) return initPromise;
 
   initPromise = (async () => {
-    const newClient = createClient();
-    bindClientEvents(newClient);
+    const c = createClient();
+    bindClientEvents(c);
 
     try {
-      await newClient.initialize();
-      client = newClient;
+      await c.initialize();
+      client = c;
       return client;
     } catch (err) {
-      console.error('INIT ERROR:', err.message);
       setError(err);
       client = null;
       throw err;
@@ -172,13 +148,9 @@ async function initWhatsAppClient() {
 function getSenderStatus() {
   let state = 'disconnected';
 
-  if (isReady) {
-    state = 'ready';
-  } else if (lastQrDataUrl) {
-    state = 'qr_required';
-  } else if (isRestarting) {
-    state = 'initializing';
-  }
+  if (isReady) state = 'ready';
+  else if (lastQrDataUrl) state = 'qr_required';
+  else if (isRestarting) state = 'initializing';
 
   return {
     ok: true,
@@ -199,11 +171,6 @@ async function ensureClient() {
   if (!client) {
     await initWhatsAppClient();
   }
-
-  if (!client) {
-    throw new Error('WhatsApp client is not initialized');
-  }
-
   return client;
 }
 
@@ -212,33 +179,26 @@ async function waitUntilReady(timeoutMs = READY_TIMEOUT_MS) {
 
   while (!isReady) {
     if (Date.now() - start > timeoutMs) {
-      throw new Error(`WhatsApp not ready after ${timeoutMs}ms`);
+      throw new Error('WhatsApp not ready');
     }
     await sleep(500);
   }
 }
 
 async function hardRestartClient() {
-  if (restartPromise) {
-    return restartPromise;
-  }
+  if (restartPromise) return restartPromise;
 
   restartPromise = (async () => {
     isRestarting = true;
 
     try {
       if (client) {
-        try {
-          await client.destroy();
-        } catch (err) {
-          console.log('Destroy error ignored:', err.message);
-        }
+        await client.destroy().catch(() => {});
       }
 
       client = null;
       isReady = false;
       lastQrDataUrl = null;
-      lastEventAt = nowIso();
 
       await initWhatsAppClient();
     } finally {
@@ -250,18 +210,18 @@ async function hardRestartClient() {
   return restartPromise;
 }
 
-async function withRecovery(workFn, label) {
+async function withRecovery(workFn) {
   try {
     return await workFn();
   } catch (err) {
-    console.error(`${label} failed:`, err.message);
     setError(err);
 
     if (!isRecoverableBrowserError(err)) {
       throw err;
     }
 
-    console.log(`Recoverable browser error detected in ${label}. Restarting client...`);
+    console.log('Recoverable error → restarting WhatsApp');
+
     await hardRestartClient();
     await waitUntilReady();
 
@@ -269,81 +229,55 @@ async function withRecovery(workFn, label) {
   }
 }
 
-async function getAllChatsSafe(currentClient) {
-  return withTimeout(
-    currentClient.getChats(),
-    GET_CHATS_TIMEOUT_MS,
-    'getChats'
-  );
-}
-
-async function getWhatsAppGroups() {
-  return withRecovery(async () => {
-    const currentClient = await ensureClient();
-    await waitUntilReady();
-
-    const chats = await getAllChatsSafe(currentClient);
-
-    const groups = chats
-      .filter((chat) => chat.isGroup)
-      .map((chat) => ({
-        whatsapp_chat_id: chat.id._serialized,
-        name: chat.name || ''
-      }));
-
-    console.log('Groups fetched:', groups.length);
-    return groups;
-  }, 'getWhatsAppGroups');
-}
+/* ===================== */
+/* ====== SEND ========= */
+/* ===================== */
 
 async function sendTextToGroupById(chatId, messageText) {
-  const sendOnce = async () => {
-    const currentClient = await ensureClient();
+  return withRecovery(async () => {
+    const c = await ensureClient();
     await waitUntilReady();
 
-    if (!chatId || !String(chatId).includes('@g.us')) {
-      throw new Error(`Invalid group id: ${chatId}`);
+    if (!chatId.includes('@g.us')) {
+      throw new Error('Invalid group id');
     }
 
-    if (!messageText || !String(messageText).trim()) {
-      throw new Error('Empty message text');
+    const text = String(messageText).trim();
+
+    console.log('--- SEND START ---', chatId);
+
+    // 🔥 קריטי — warmup
+    try {
+      await withTimeout(c.getState(), 15000, 'warmup');
+    } catch (e) {
+      console.log('Warmup failed:', e.message);
     }
 
-    const cleanMessage = String(messageText).trim();
+    let result;
 
-    console.log('--- SEND START ---');
-    console.log('Target group id:', chatId);
-    console.log('Message length:', cleanMessage.length);
-
-    const chats = await getAllChatsSafe(currentClient);
-    const targetChat = chats.find(
-      (chat) => chat?.id?._serialized === chatId
-    );
-
-    if (!targetChat) {
-      throw new Error(`Target group not found in chats list: ${chatId}`);
-    }
-
-    console.log('Target group found:', targetChat.name || '(no name)');
-
-    let result = null;
-
+    // ניסיון ראשון — ישיר
     try {
       result = await withTimeout(
-        targetChat.sendMessage(cleanMessage),
-        SEND_MESSAGE_TIMEOUT_MS,
-        'chat.sendMessage'
+        c.sendMessage(chatId, text),
+        SEND_TIMEOUT_MS,
+        'sendMessage direct'
       );
-      console.log('Send method used: chat.sendMessage');
-    } catch (firstErr) {
-      console.log('chat.sendMessage failed, trying client.sendMessage:', firstErr.message);
+
+      console.log('Direct send success');
+    } catch (err) {
+      console.log('Direct failed → fallback:', err.message);
+
+      const chat = await withTimeout(
+        c.getChatById(chatId),
+        SEND_TIMEOUT_MS,
+        'getChatById'
+      );
 
       result = await withTimeout(
-        currentClient.sendMessage(chatId, cleanMessage),
-        SEND_MESSAGE_TIMEOUT_MS,
-        'client.sendMessage'
+        chat.sendMessage(text),
+        SEND_TIMEOUT_MS,
+        'sendMessage fallback'
       );
-      console.log('Send method used: client.sendMessage');
     }
 
     console.log('--- SEND SUCCESS ---');
@@ -353,18 +287,34 @@ async function sendTextToGroupById(chatId, messageText) {
       message_id: result?.id?._serialized || null,
       status: 'sent'
     };
-  };
-
-  try {
-    return await withRecovery(sendOnce, `sendTextToGroupById(${chatId})`);
-  } catch (err) {
-    console.error('--- SEND FAILED ---');
-    console.error('Target:', chatId);
-    console.error('Reason:', err.message);
-    setError(err);
-    throw err;
-  }
+  });
 }
+
+/* ===================== */
+/* ===== GROUPS ======== */
+/* ===================== */
+
+async function getWhatsAppGroups() {
+  return withRecovery(async () => {
+    const c = await ensureClient();
+    await waitUntilReady();
+
+    const chats = await withTimeout(
+      c.getChats(),
+      60000,
+      'getChats'
+    );
+
+    return chats
+      .filter(c => c.isGroup)
+      .map(c => ({
+        whatsapp_chat_id: c.id._serialized,
+        name: c.name || ''
+      }));
+  });
+}
+
+/* ===================== */
 
 async function restartClient() {
   await hardRestartClient();
@@ -375,28 +325,19 @@ async function resetSession() {
 
   try {
     if (client) {
-      try {
-        await client.destroy();
-      } catch (err) {
-        console.log('Destroy error ignored:', err.message);
-      }
+      await client.destroy().catch(() => {});
     }
 
     client = null;
 
-    try {
-      fs.rmSync(path.resolve(SESSION_PATH), {
-        recursive: true,
-        force: true
-      });
-    } catch (err) {
-      console.log('Session cleanup skipped:', err.message);
-    }
+    fs.rmSync(path.resolve(SESSION_PATH), {
+      recursive: true,
+      force: true
+    });
 
     isReady = false;
     lastQrDataUrl = null;
     lastError = null;
-    lastEventAt = nowIso();
 
     await initWhatsAppClient();
   } finally {
