@@ -58,6 +58,7 @@ function sleep(ms) {
 
 function dataUrlToBuffer(dataUrl) {
   const matches = dataUrl.match(/^data:(.+);base64,(.+)$/);
+
   if (!matches) {
     throw new Error('Invalid data URL');
   }
@@ -68,6 +69,12 @@ function dataUrlToBuffer(dataUrl) {
 
   return { mimeType, buffer };
 }
+
+let queue = [];
+let isRunning = false;
+let isPaused = false;
+let currentJob = null;
+let lastBroadcastSummary = null;
 
 /* ---------------- HEALTH ---------------- */
 
@@ -82,7 +89,14 @@ app.get('/health', (req, res) => {
 
 app.get('/status', (req, res) => {
   try {
-    res.json(getSenderStatus());
+    res.json({
+      ...getSenderStatus(),
+      queue_length: queue.length,
+      running: isRunning,
+      paused: isPaused,
+      current: currentJob,
+      summary: lastBroadcastSummary
+    });
   } catch (err) {
     res.status(500).json({
       ok: false,
@@ -236,13 +250,7 @@ app.post('/send-test', async (req, res) => {
   }
 });
 
-/* ---------------- BROADCAST ---------------- */
-
-let queue = [];
-let isRunning = false;
-let isPaused = false;
-let currentJob = null;
-let lastBroadcastSummary = null;
+/* ---------------- BROADCAST QUEUE ---------------- */
 
 async function processQueue() {
   if (isRunning) return;
@@ -263,7 +271,7 @@ async function processQueue() {
 
     console.log('Processing job:', {
       chatId: job.chatId,
-      message: job.message
+      messageLength: job.message.length
     });
 
     for (let attempt = 0; attempt <= job.retries; attempt++) {
@@ -274,7 +282,7 @@ async function processQueue() {
       } catch (err) {
         lastError = err.message;
         console.error(`Attempt ${attempt + 1} failed for ${job.chatId}:`, err.message);
-        await sleep(1200);
+        await sleep(1500);
       }
     }
 
@@ -308,6 +316,8 @@ async function processQueue() {
     lastBroadcastSummary.finished_at = new Date().toISOString();
   }
 }
+
+/* ---------------- BROADCAST ---------------- */
 
 app.post('/broadcast', async (req, res) => {
   try {
@@ -368,6 +378,73 @@ app.post('/broadcast', async (req, res) => {
     });
   } catch (err) {
     console.error('POST /broadcast failed:', err.message);
+
+    return res.status(500).json({
+      ok: false,
+      error: err.message
+    });
+  }
+});
+
+/* ---------------- CLUSTER BROADCAST ---------------- */
+
+app.post('/broadcast/clusters', async (req, res) => {
+  try {
+    const { clusters = [], delay_ms = 3000, retries = 2 } = req.body;
+
+    if (!Array.isArray(clusters) || clusters.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: 'clusters are required'
+      });
+    }
+
+    let totalTargets = 0;
+
+    clusters.forEach((cluster) => {
+      const targets = normalizeTargets(cluster.targets || []);
+      const message = normalizeMessage(cluster);
+
+      if (!message) return;
+
+      targets.forEach((chatId) => {
+        queue.push({
+          chatId,
+          message,
+          delay: Number(delay_ms),
+          retries: Number(retries),
+          status: 'queued',
+          error: null,
+          created_at: new Date().toISOString(),
+          finished_at: null
+        });
+        totalTargets += 1;
+      });
+    });
+
+    if (totalTargets === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: 'No valid cluster targets to queue'
+      });
+    }
+
+    lastBroadcastSummary = {
+      total: totalTargets,
+      sent: 0,
+      failed: 0,
+      started_at: new Date().toISOString(),
+      finished_at: null
+    };
+
+    processQueue();
+
+    return res.json({
+      ok: true,
+      queued: totalTargets
+    });
+  } catch (err) {
+    console.error('POST /broadcast/clusters failed:', err.message);
 
     return res.status(500).json({
       ok: false,
