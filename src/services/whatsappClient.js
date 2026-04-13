@@ -15,6 +15,11 @@ let isRestarting = false;
 
 const SESSION_PATH = '.wwebjs_auth';
 
+const READY_TIMEOUT_MS = 45000;
+const GET_CHATS_TIMEOUT_MS = 45000;
+const GET_CHAT_BY_ID_TIMEOUT_MS = 45000;
+const SEND_MESSAGE_TIMEOUT_MS = 60000;
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -22,6 +27,19 @@ function nowIso() {
 function setError(err) {
   lastError = err ? String(err.message || err) : null;
   lastEventAt = nowIso();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout(promise, timeoutMs, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)), timeoutMs)
+    )
+  ]);
 }
 
 async function buildQrDataUrl(qrText) {
@@ -187,14 +205,14 @@ async function ensureClient() {
   return client;
 }
 
-async function waitUntilReady(timeoutMs = 25000) {
+async function waitUntilReady(timeoutMs = READY_TIMEOUT_MS) {
   const start = Date.now();
 
   while (!isReady) {
     if (Date.now() - start > timeoutMs) {
-      throw new Error('WhatsApp not ready after timeout');
+      throw new Error(`WhatsApp not ready after ${timeoutMs}ms`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await sleep(500);
   }
 }
 
@@ -254,12 +272,11 @@ async function getWhatsAppGroups() {
     const currentClient = await ensureClient();
     await waitUntilReady();
 
-    const chats = await Promise.race([
+    const chats = await withTimeout(
       currentClient.getChats(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('getChats timeout')), 20000)
-      )
-    ]);
+      GET_CHATS_TIMEOUT_MS,
+      'getChats'
+    );
 
     const groups = chats
       .filter((chat) => chat.isGroup)
@@ -274,7 +291,7 @@ async function getWhatsAppGroups() {
 }
 
 async function sendTextToGroupById(chatId, messageText) {
-  return withRecovery(async () => {
+  const sendOnce = async () => {
     const currentClient = await ensureClient();
     await waitUntilReady();
 
@@ -292,12 +309,11 @@ async function sendTextToGroupById(chatId, messageText) {
     console.log('Target group id:', chatId);
     console.log('Message length:', cleanMessage.length);
 
-    const chat = await Promise.race([
+    const chat = await withTimeout(
       currentClient.getChatById(chatId),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('getChatById timeout')), 20000)
-      )
-    ]);
+      GET_CHAT_BY_ID_TIMEOUT_MS,
+      'getChatById'
+    );
 
     if (!chat) {
       throw new Error(`Target group not found: ${chatId}`);
@@ -305,12 +321,11 @@ async function sendTextToGroupById(chatId, messageText) {
 
     console.log('Target group found:', chat.name || '(no name)');
 
-    const result = await Promise.race([
+    const result = await withTimeout(
       chat.sendMessage(cleanMessage),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('sendMessage timeout')), 25000)
-      )
-    ]);
+      SEND_MESSAGE_TIMEOUT_MS,
+      'sendMessage'
+    );
 
     console.log('--- SEND SUCCESS ---');
 
@@ -319,7 +334,17 @@ async function sendTextToGroupById(chatId, messageText) {
       message_id: result?.id?._serialized || null,
       status: 'sent'
     };
-  }, `sendTextToGroupById(${chatId})`);
+  };
+
+  try {
+    return await withRecovery(sendOnce, `sendTextToGroupById(${chatId})`);
+  } catch (err) {
+    console.error('--- SEND FAILED ---');
+    console.error('Target:', chatId);
+    console.error('Reason:', err.message);
+    setError(err);
+    throw err;
+  }
 }
 
 async function restartClient() {
