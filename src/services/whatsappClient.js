@@ -246,7 +246,6 @@ async function sendTextToGroupById(chatId, messageText) {
 
     console.log('--- SEND START ---', chatId);
 
-    // 🔥 קריטי — warmup
     try {
       await withTimeout(c.getState(), 15000, 'warmup');
     } catch (e) {
@@ -255,14 +254,12 @@ async function sendTextToGroupById(chatId, messageText) {
 
     let result;
 
-    // ניסיון ראשון — ישיר
     try {
       result = await withTimeout(
         c.sendMessage(chatId, text),
         SEND_TIMEOUT_MS,
         'sendMessage direct'
       );
-
       console.log('Direct send success');
     } catch (err) {
       console.log('Direct failed → fallback:', err.message);
@@ -320,7 +317,6 @@ async function getWhatsAppGroups() {
       return [];
     }
   });
-}
 }
 
 /* ===================== */
