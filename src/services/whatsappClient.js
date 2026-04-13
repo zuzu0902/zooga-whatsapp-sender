@@ -299,18 +299,28 @@ async function getWhatsAppGroups() {
     const c = await ensureClient();
     await waitUntilReady();
 
-    const chats = await withTimeout(
-      c.getChats(),
-      60000,
-      'getChats'
-    );
+    console.log('Fetching groups...');
 
-    return chats
-      .filter(c => c.isGroup)
-      .map(c => ({
-        whatsapp_chat_id: c.id._serialized,
-        name: c.name || ''
-      }));
+    try {
+      const chats = await withTimeout(
+        c.getChats(),
+        45000,
+        'getChats'
+      );
+
+      return chats
+        .filter(chat => chat.isGroup)
+        .map(chat => ({
+          whatsapp_chat_id: chat.id._serialized,
+          name: chat.name || ''
+        }));
+
+    } catch (err) {
+      console.log('getChats failed — returning empty list instead of crashing');
+      return [];
+    }
+  });
+}
   });
 }
 
