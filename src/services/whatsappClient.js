@@ -389,9 +389,13 @@ async function sendTextToGroupById(chatId, messageText) {
 
     const expectedMessageId = result?.id?._serialized || null;
 
+    if (!expectedMessageId) {
+      throw new Error('Message sent without message_id');
+    }
+
     let verified = false;
 
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 3; i++) {
       await sleep(2000);
       verified = await verifyMessageInChat(
         currentClient,
@@ -406,15 +410,16 @@ async function sendTextToGroupById(chatId, messageText) {
     }
 
     if (!verified) {
-      throw new Error('Message not verified in chat after send');
+      console.log('Message verification failed, but sendMessage already returned success. Marking as sent with warning.');
+    } else {
+      console.log('--- SEND VERIFIED SUCCESS ---');
     }
-
-    console.log('--- SEND VERIFIED SUCCESS ---');
 
     return {
       whatsapp_chat_id: chatId,
       message_id: expectedMessageId,
-      status: 'sent'
+      status: 'sent',
+      verified
     };
   };
 
