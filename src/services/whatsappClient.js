@@ -321,7 +321,6 @@ async function getWhatsAppGroups() {
     }
   });
 }
-  });
 }
 
 /* ===================== */
