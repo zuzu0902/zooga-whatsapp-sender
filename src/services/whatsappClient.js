@@ -16,9 +16,8 @@ let isRestarting = false;
 const SESSION_PATH = '.wwebjs_auth';
 
 const READY_TIMEOUT_MS = 45000;
-const GET_CHATS_TIMEOUT_MS = 45000;
-const GET_CHAT_BY_ID_TIMEOUT_MS = 45000;
-const SEND_MESSAGE_TIMEOUT_MS = 60000;
+const GET_CHATS_TIMEOUT_MS = 90000;
+const SEND_MESSAGE_TIMEOUT_MS = 90000;
 
 function nowIso() {
   return new Date().toISOString();
@@ -37,7 +36,10 @@ async function withTimeout(promise, timeoutMs, label) {
   return Promise.race([
     promise,
     new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)), timeoutMs)
+      setTimeout(
+        () => reject(new Error(`${label} timeout after ${timeoutMs}ms`)),
+        timeoutMs
+      )
     )
   ]);
 }
@@ -267,16 +269,20 @@ async function withRecovery(workFn, label) {
   }
 }
 
+async function getAllChatsSafe(currentClient) {
+  return withTimeout(
+    currentClient.getChats(),
+    GET_CHATS_TIMEOUT_MS,
+    'getChats'
+  );
+}
+
 async function getWhatsAppGroups() {
   return withRecovery(async () => {
     const currentClient = await ensureClient();
     await waitUntilReady();
 
-    const chats = await withTimeout(
-      currentClient.getChats(),
-      GET_CHATS_TIMEOUT_MS,
-      'getChats'
-    );
+    const chats = await getAllChatsSafe(currentClient);
 
     const groups = chats
       .filter((chat) => chat.isGroup)
@@ -309,23 +315,36 @@ async function sendTextToGroupById(chatId, messageText) {
     console.log('Target group id:', chatId);
     console.log('Message length:', cleanMessage.length);
 
-    const chat = await withTimeout(
-      currentClient.getChatById(chatId),
-      GET_CHAT_BY_ID_TIMEOUT_MS,
-      'getChatById'
+    const chats = await getAllChatsSafe(currentClient);
+    const targetChat = chats.find(
+      (chat) => chat?.id?._serialized === chatId
     );
 
-    if (!chat) {
-      throw new Error(`Target group not found: ${chatId}`);
+    if (!targetChat) {
+      throw new Error(`Target group not found in chats list: ${chatId}`);
     }
 
-    console.log('Target group found:', chat.name || '(no name)');
+    console.log('Target group found:', targetChat.name || '(no name)');
 
-    const result = await withTimeout(
-      chat.sendMessage(cleanMessage),
-      SEND_MESSAGE_TIMEOUT_MS,
-      'sendMessage'
-    );
+    let result = null;
+
+    try {
+      result = await withTimeout(
+        targetChat.sendMessage(cleanMessage),
+        SEND_MESSAGE_TIMEOUT_MS,
+        'chat.sendMessage'
+      );
+      console.log('Send method used: chat.sendMessage');
+    } catch (firstErr) {
+      console.log('chat.sendMessage failed, trying client.sendMessage:', firstErr.message);
+
+      result = await withTimeout(
+        currentClient.sendMessage(chatId, cleanMessage),
+        SEND_MESSAGE_TIMEOUT_MS,
+        'client.sendMessage'
+      );
+      console.log('Send method used: client.sendMessage');
+    }
 
     console.log('--- SEND SUCCESS ---');
 
